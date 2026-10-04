@@ -1,0 +1,10 @@
+{
+  "description": "Transform Figma designs into responsive React components using Tailwind, streamlining the development process for designers and developers.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
