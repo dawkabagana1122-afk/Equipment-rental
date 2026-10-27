@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cors from 'cors';
 import express from 'express';
+import { createDatabaseStore } from './db.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -155,6 +156,7 @@ const dashboard = {
 };
 
 const createToken = () => crypto.randomBytes(18).toString('hex');
+const database = await createDatabaseStore({ dashboard, equipment, alerts, notifications, supportTeam });
 
 if (existsSync(distPath)) {
   app.use(express.static(distPath));
@@ -164,8 +166,18 @@ if (existsSync(distPath)) {
   });
 }
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'ops-backend', time: new Date().toISOString() });
+app.get('/api/health', async (req, res, next) => {
+  try {
+    await database?.healthCheck();
+    res.json({
+      status: 'ok',
+      service: 'ops-backend',
+      time: new Date().toISOString(),
+      database: database ? 'connected' : 'not_configured',
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -198,42 +210,71 @@ app.post('/api/auth/login', (req, res) => {
   });
 });
 
-app.get('/api/dashboard', (req, res) => {
-  res.json(dashboard);
-});
-
-app.get('/api/equipment', (req, res) => {
-  res.json(equipment);
-});
-
-app.get('/api/equipment/:id', (req, res) => {
-  const item = equipment.find((entry) => entry.id === req.params.id);
-
-  if (!item) {
-    return res.status(404).json({ message: 'Төхөөрөмж олдсонгүй' });
+app.get('/api/dashboard', async (req, res, next) => {
+  try {
+    res.json(database ? await database.getDashboard() : dashboard);
+  } catch (error) {
+    next(error);
   }
-
-  return res.json(item);
 });
 
-app.get('/api/notifications', (req, res) => {
-  res.json(notifications);
+app.get('/api/equipment', async (req, res, next) => {
+  try {
+    res.json(database ? await database.getEquipment() : equipment);
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.get('/api/alerts', (req, res) => {
-  res.json(alerts);
+app.get('/api/equipment/:id', async (req, res, next) => {
+  try {
+    const item = database
+      ? await database.getEquipmentById(req.params.id)
+      : equipment.find((entry) => entry.id === req.params.id);
+
+    if (!item) {
+      return res.status(404).json({ message: 'Төхөөрөмж олдсонгүй' });
+    }
+
+    return res.json(item);
+  } catch (error) {
+    return next(error);
+  }
 });
 
-app.post('/api/support', (req, res) => {
+app.get('/api/notifications', async (req, res, next) => {
+  try {
+    res.json(database ? await database.getNotifications() : notifications);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/alerts', async (req, res, next) => {
+  try {
+    res.json(database ? await database.getAlerts() : alerts);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/support', async (req, res, next) => {
   const { message = 'Тусламжийн хүсэлт илгээгдлээ', team = 'support' } = req.body ?? {};
 
-  return res.json({
-    ok: true,
-    message,
-    team,
-    ticketId: 'A-8842',
-    updatedAt: new Date().toISOString(),
-  });
+  try {
+    const ticket = database
+      ? await database.createSupportRequest(message, team)
+      : { ticketId: 'A-8842', updatedAt: new Date().toISOString() };
+
+    return res.json({ ok: true, message, team, ...ticket });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.use((error, req, res, next) => {
+  console.error('API request failed:', error);
+  res.status(500).json({ message: 'Серверийн алдаа гарлаа.' });
 });
 
 app.listen(port, '0.0.0.0', () => {
