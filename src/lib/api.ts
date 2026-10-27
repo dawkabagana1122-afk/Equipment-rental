@@ -1,4 +1,4 @@
-export type UserRole = 'manager' | 'fixer' | 'renter' | 'employee' | 'tenant';
+export type UserRole = 'admin' | 'manager' | 'fixer' | 'renter';
 
 export type Session = {
   token: string;
@@ -9,6 +9,7 @@ export type Session = {
 export type User = {
   id: string;
   role: UserRole;
+  email: string;
   phone: string;
   name: string;
   company: string;
@@ -64,30 +65,57 @@ export type DashboardResponse = {
   supportTeam: { name: string; role: string }[];
 };
 
+let sessionToken: string | null = null;
+
+export const setSessionToken = (token: string | null) => {
+  sessionToken = token;
+};
+
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(`/api${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
       ...(init?.headers ?? {}),
     },
     ...init,
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || 'Request failed');
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.message ?? 'Хүсэлт амжилтгүй боллоо.');
   }
 
   return response.json() as Promise<T>;
 };
 
+type AuthResponse = { message: string; user: User; session: Session };
+
+const saveSession = async (result: Promise<AuthResponse>) => {
+  const auth = await result;
+  setSessionToken(auth.session.token);
+  return auth;
+};
+
 export const api = {
   health: () => request<{ status: string; service: string; time: string }>('/health'),
-  login: (payload: { role: UserRole; phone: string; code: string }) =>
-    request<{ message: string; user: User; session: Session }>('/auth/login', {
+  login: (payload: { email: string; password: string }) =>
+    saveSession(request<AuthResponse>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }),
+    })),
+  register: (payload: { email: string; name: string; company: string; password: string }) =>
+    saveSession(request<AuthResponse>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })),
+  logout: async () => {
+    try {
+      await request<{ message: string }>('/auth/logout', { method: 'POST' });
+    } finally {
+      setSessionToken(null);
+    }
+  },
   getDashboard: () => request<DashboardResponse>('/dashboard'),
   getEquipment: () => request<EquipmentItem[]>('/equipment'),
   getEquipmentById: (id: string) => request<EquipmentItem>(`/equipment/${id}`),

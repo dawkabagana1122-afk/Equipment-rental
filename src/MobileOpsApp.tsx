@@ -270,8 +270,22 @@ function HomeScreen({
   role: UserRole;
 }) {
   const summary = dashboard.summary;
-  const roleLabel = role === "manager" ? "Менежер" : role === "fixer" ? "Фиксер" : "Түрээслэгч";
-  const roleGreeting = role === "manager" ? "Тайлангийн тойм" : role === "fixer" ? "Ажлын тасалбар" : "Түрээслэх бүртгэл";
+  const roleLabel =
+    role === "admin"
+      ? "Админ"
+      : role === "manager"
+        ? "Менежер"
+        : role === "fixer"
+          ? "Фиксер"
+          : "Түрээслэгч";
+  const roleGreeting =
+    role === "admin"
+      ? "Админы самбар"
+      : role === "manager"
+        ? "Тайлангийн тойм"
+        : role === "fixer"
+          ? "Ажлын тасалбар"
+          : "Түрээслэх бүртгэл";
 
   return (
     <MobilePage current="home" onNavigate={onNavigate}>
@@ -412,11 +426,13 @@ function HomeScreen({
           </p>
           <div className="mt-2 flex items-center justify-between">
             <span className="font-['Inter:Bold'] text-[12px] font-bold text-[#14212a]">
-              {role === "manager"
-                ? "Бүртгэл, тайлан, даалгавар"
-                : role === "fixer"
-                  ? "Засвар, QR, telemetry"
-                  : "Гэрээ, төлбөр, түрээсийн хяналт"}
+              {role === "admin"
+                ? "Хэрэглэгч, түрээс, тайлангийн удирдлага"
+                : role === "manager"
+                  ? "Бүртгэл, тайлан, даалгавар"
+                  : role === "fixer"
+                    ? "Засвар, QR, telemetry"
+                    : "Гэрээ, төлбөр, түрээсийн хяналт"}
             </span>
             <button
               className="rounded-full bg-[#1677a8] px-2.5 py-1 text-[9px] font-bold text-white"
@@ -1442,6 +1458,7 @@ export default function MobileOpsApp({
     user: {
       id: string;
       role: UserRole;
+      email: string;
       phone: string;
       name: string;
       company: string;
@@ -1500,6 +1517,7 @@ export default function MobileOpsApp({
     user: {
       id: string;
       role: UserRole;
+      email: string;
       phone: string;
       name: string;
       company: string;
@@ -1515,6 +1533,9 @@ export default function MobileOpsApp({
   };
 
   const handleSignOut = () => {
+    void api.logout().catch((error) => {
+      console.error("Could not revoke session:", error);
+    });
     setSession(null);
     setDashboard(fallbackDashboard);
     window.location.hash = "login";

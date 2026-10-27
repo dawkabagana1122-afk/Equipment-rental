@@ -1,7 +1,36 @@
-import { randomUUID } from "node:crypto"
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  scrypt as scryptCallback,
+  timingSafeEqual,
+} from "node:crypto"
+import { promisify } from "node:util"
 import pg from "pg"
 
 const { Pool } = pg
+const scrypt = promisify(scryptCallback)
+const passwordLength = 64
+
+const hashPassword = async (password) => {
+  const salt = randomBytes(16)
+  const hash = await scrypt(password, salt, passwordLength)
+  return { salt: salt.toString("hex"), hash: hash.toString("hex") }
+}
+
+const dummyCredentials = await hashPassword(randomBytes(32).toString("hex"))
+
+const verifyPassword = async (password, saltHex, hashHex) => {
+  const expected = Buffer.from(hashHex, "hex")
+  const actual = await scrypt(
+    password,
+    Buffer.from(saltHex, "hex"),
+    expected.length,
+  )
+  return timingSafeEqual(actual, expected)
+}
+
+const hashToken = (token) => createHash("sha256").update(token).digest("hex")
 
 const schema = `
   CREATE TABLE IF NOT EXISTS equipment (
@@ -34,6 +63,21 @@ const schema = `
     message text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
   );
+  CREATE TABLE IF NOT EXISTS app_users (
+    id uuid PRIMARY KEY,
+    email text NOT NULL UNIQUE,
+    name text NOT NULL,
+    company text NOT NULL,
+    role text NOT NULL CHECK (role IN ('admin', 'manager', 'fixer', 'renter')),
+    password_salt text NOT NULL,
+    password_hash text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE TABLE IF NOT EXISTS app_sessions (
+    token_hash text PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+    expires_at timestamptz NOT NULL
+  );
 `
 
 const seedRows = async (client, table, rows) => {
@@ -50,6 +94,31 @@ const readRows = async (pool, table) => {
     `SELECT data FROM ${table} ORDER BY position`,
   )
   return rows.map(({ data }) => data)
+}
+
+const normalizeEmail = (email) => email.trim().toLowerCase()
+
+const publicUser = ({ id, email, name, company, role }) => ({
+  id,
+  email,
+  name,
+  company,
+  role,
+  phone: "",
+})
+
+const createSession = async (pool, user) => {
+  const token = randomBytes(32).toString("base64url")
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000)
+  await pool.query(
+    "INSERT INTO app_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)",
+    [hashToken(token), user.id, expiresAt],
+  )
+  return {
+    token,
+    role: user.role,
+    expiresAt: expiresAt.toISOString(),
+  }
 }
 
 export const createDatabaseStore = async ({
@@ -86,6 +155,43 @@ export const createDatabaseStore = async ({
       "INSERT INTO dashboard_settings (key, data) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
       ["summary", dashboard.summary],
     )
+    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase()
+    const adminPassword = process.env.ADMIN_PASSWORD
+    if (Boolean(adminEmail) !== Boolean(adminPassword)) {
+      throw new Error(
+        "Set both ADMIN_EMAIL and ADMIN_PASSWORD to bootstrap an admin.",
+      )
+    }
+    if (adminEmail && adminPassword) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
+        throw new Error("ADMIN_EMAIL must be a valid email address.")
+      }
+      if (adminPassword.length < 12) {
+        throw new Error("ADMIN_PASSWORD must contain at least 12 characters.")
+      }
+
+      const { rows: existingAdmin } = await client.query(
+        "SELECT id, role FROM app_users WHERE email = $1",
+        [adminEmail],
+      )
+      if (existingAdmin[0] && existingAdmin[0].role !== "admin") {
+        throw new Error("ADMIN_EMAIL belongs to a non-admin account.")
+      }
+      if (!existingAdmin[0]) {
+        const credentials = await hashPassword(adminPassword)
+        await client.query(
+          "INSERT INTO app_users (id, email, name, company, role, password_salt, password_hash) VALUES ($1, $2, $3, $4, 'admin', $5, $6)",
+          [
+            randomUUID(),
+            adminEmail,
+            "Administrator",
+            "Equipment Rental",
+            credentials.salt,
+            credentials.hash,
+          ],
+        )
+      }
+    }
     await client.query("COMMIT")
     transactionStarted = false
   } catch (error) {
@@ -154,6 +260,66 @@ export const createDatabaseStore = async ({
         [ticketId, team, message],
       )
       return { ticketId, updatedAt: rows[0].created_at.toISOString() }
+    },
+    registerUser: async ({ email, name, company, password }) => {
+      const credentials = await hashPassword(password)
+      const id = randomUUID()
+      try {
+        await pool.query(
+          "INSERT INTO app_users (id, email, name, company, role, password_salt, password_hash) VALUES ($1, $2, $3, $4, 'renter', $5, $6)",
+          [
+            id,
+            normalizeEmail(email),
+            name.trim(),
+            company.trim(),
+            credentials.salt,
+            credentials.hash,
+          ],
+        )
+      } catch (error) {
+        if (error.code === "23505") return null
+        throw error
+      }
+
+      const user = publicUser({
+        id,
+        email: normalizeEmail(email),
+        name: name.trim(),
+        company: company.trim(),
+        role: "renter",
+      })
+      return { user, session: await createSession(pool, user) }
+    },
+    loginUser: async ({ email, password }) => {
+      const { rows } = await pool.query(
+        "SELECT id, email, name, company, role, password_salt, password_hash FROM app_users WHERE email = $1",
+        [normalizeEmail(email)],
+      )
+      const account = rows[0]
+      if (password.length > 128) return null
+      const passwordMatches = await verifyPassword(
+        password,
+        account?.password_salt ?? dummyCredentials.salt,
+        account?.password_hash ?? dummyCredentials.hash,
+      )
+      if (!account || !passwordMatches) {
+        return null
+      }
+
+      const user = publicUser(account)
+      return { user, session: await createSession(pool, user) }
+    },
+    getSession: async (token) => {
+      const { rows } = await pool.query(
+        "SELECT u.id, u.email, u.name, u.company, u.role FROM app_sessions s JOIN app_users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()",
+        [hashToken(token)],
+      )
+      return rows[0] ? publicUser(rows[0]) : null
+    },
+    logout: async (token) => {
+      await pool.query("DELETE FROM app_sessions WHERE token_hash = $1", [
+        hashToken(token),
+      ])
     },
   }
 }
